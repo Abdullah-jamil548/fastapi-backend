@@ -9,6 +9,7 @@ The public contract is unchanged: POST /api/transcribe with a multipart
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -52,6 +53,20 @@ CHUNK_SIZE = 16 * 1024
 SESSION_TIMEOUT_S = 30
 
 
+def _websocket_connect(url: str, headers: dict):
+    """websockets 13 still uses extra_headers; 14+ renamed it to additional_headers."""
+    kwargs: dict = {"max_size": None}
+    try:
+        params = inspect.signature(websockets.connect).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "additional_headers" in params:
+        kwargs["additional_headers"] = headers
+    else:
+        kwargs["extra_headers"] = headers
+    return websockets.connect(url, **kwargs)
+
+
 async def transcribe_realtime(file_bytes: bytes, language: str | None) -> str:
     api_key = os.environ.get("SPEECHMATICS_API_KEY")
     final_chunks: list[str] = []
@@ -61,10 +76,9 @@ async def transcribe_realtime(file_bytes: bytes, language: str | None) -> str:
     async def run() -> str:
         nonlocal offset, sent_chunks
 
-        async with websockets.connect(
+        async with _websocket_connect(
             RT_URL,
-            additional_headers={"Authorization": f"Bearer {api_key}"},
-            max_size=None,
+            {"Authorization": f"Bearer {api_key}"},
         ) as ws:
 
             async def send_next_chunk():
