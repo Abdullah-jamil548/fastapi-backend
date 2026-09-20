@@ -2,7 +2,6 @@
 Standalone proxy server: receives audio from the SpeakEasy app and forwards
 it to Speechmatics' Real-time ASR API for transcription.
 
-FastAPI port of the original Express/Node backend. Same public contract:
 POST /api/transcribe with a multipart 'audio' file + 'language' field,
 returns { "text": "..." }.
 """
