@@ -48,8 +48,44 @@ MAX_DELAY = float(os.environ.get("SPEECHMATICS_MAX_DELAY", 4))
 CHUNK_SIZE = 16 * 1024
 
 # Safety net: if Speechmatics never finishes (bad network, stuck session),
-# don't hang the request forever.
-SESSION_TIMEOUT_S = 30
+# don't hang the request forever. The limit grows with the recording,
+# because Speechmatics needs roughly 1/3 of the audio length to process it:
+# a fixed 30s cap made every recording longer than ~1.5 min (most stories)
+# fail with "session timed out".
+SESSION_TIMEOUT_MIN_S = 30
+SESSION_TIMEOUT_MAX_S = 240
+# Used when the length can't be read from the file (non-WAV, e.g. a
+# WhatsApp voice note).
+SESSION_TIMEOUT_UNKNOWN_S = 180
+
+
+def _wav_duration_seconds(file_bytes: bytes) -> float | None:
+    """Duration of a PCM WAV from its header, or None if it isn't a WAV."""
+    if len(file_bytes) < 44 or file_bytes[:4] != b"RIFF" or file_bytes[8:12] != b"WAVE":
+        return None
+    pos = 12
+    byte_rate = None
+    while pos + 8 <= len(file_bytes):
+        chunk_id = file_bytes[pos:pos + 4]
+        chunk_size = int.from_bytes(file_bytes[pos + 4:pos + 8], "little")
+        if chunk_id == b"fmt " and pos + 20 <= len(file_bytes):
+            byte_rate = int.from_bytes(file_bytes[pos + 16:pos + 20], "little")
+        elif chunk_id == b"data":
+            if not byte_rate:
+                return None
+            # Some recorders write a 0/oversized data size; fall back to
+            # whatever bytes are actually there.
+            data_len = min(chunk_size, len(file_bytes) - pos - 8) or len(file_bytes) - pos - 8
+            return data_len / byte_rate
+        pos += 8 + chunk_size + (chunk_size & 1)
+    return None
+
+
+def session_timeout_for(file_bytes: bytes) -> float:
+    duration = _wav_duration_seconds(file_bytes)
+    if duration is None:
+        return SESSION_TIMEOUT_UNKNOWN_S
+    return max(SESSION_TIMEOUT_MIN_S, min(SESSION_TIMEOUT_MAX_S, 30 + duration * 0.75))
 
 
 async def transcribe_realtime(file_bytes: bytes, language: str | None) -> str:
@@ -126,7 +162,7 @@ async def transcribe_realtime(file_bytes: bytes, language: str | None) -> str:
             raise RuntimeError("Speechmatics WebSocket closed before finishing")
 
     try:
-        return await asyncio.wait_for(run(), timeout=SESSION_TIMEOUT_S)
+        return await asyncio.wait_for(run(), timeout=session_timeout_for(file_bytes))
     except asyncio.TimeoutError:
         raise RuntimeError("Speechmatics real-time session timed out")
     except websockets.exceptions.WebSocketException as exc:
